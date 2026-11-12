@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,6 +19,11 @@ import (
 	"github.com/bjesus/pipet/outputs"
 	"github.com/bjesus/pipet/utils"
 )
+
+// errPartialFailure signals that at least one block failed while others may
+// have completed. The per-block details were already printed on stderr, so
+// main() only needs to turn this into a non-zero exit code.
+var errPartialFailure = errors.New("one or more blocks failed")
 
 func main() {
 	log.SetFlags(log.Lshortfile | log.Ltime)
@@ -83,6 +89,14 @@ func main() {
 	}
 
 	if err := app.Run(os.Args); err != nil {
+		switch {
+		case errors.Is(err, outputs.ErrBrokenPipe):
+			// The downstream consumer (e.g. `head`) went away. This is a
+			// normal way for a piped command to end, so leave quietly.
+			os.Exit(0)
+		case errors.Is(err, errPartialFailure):
+			os.Exit(1)
+		}
 		log.Println("pipet version", app.Version)
 		log.Fatal(err)
 	}
@@ -130,17 +144,39 @@ func runPipet(c *cli.Context, specFile string) error {
 			return fmt.Errorf("error executing blocks: %w", err)
 		}
 
+		// Report block failures on stderr while still emitting the data of
+		// the blocks and pages that did complete.
+		for _, blockErr := range pipet.BlockErrors() {
+			fmt.Fprintf(os.Stderr,
+				"pipet: block %d stopped at page %d (%s): %s\n",
+				blockErr.Block, blockErr.Page, blockErr.Stage, blockErr.Message)
+		}
+
 		log.Println("Generating output")
 
 		if jsonOutput {
-			newValue = outputs.OutputJSON(pipet)
+			newValue, err = outputs.OutputJSON(pipet)
+			if err != nil {
+				return fmt.Errorf("error generating JSON output: %w", err)
+			}
 		} else if templateFile != "" {
-			newValue = outputs.OutputTemplate(pipet, templateFile)
+			newValue, err = outputs.OutputTemplate(pipet, templateFile)
+			if err != nil {
+				return err
+			}
 		} else {
 			newValue = outputs.OutputText(pipet)
 		}
 
-		fmt.Print(newValue)
+		if writeErr := outputs.Write(os.Stdout, newValue); writeErr != nil {
+			return writeErr
+		}
+
+		// A failed block is reported immediately, even in interval mode, so
+		// the exit status cannot silently stay zero.
+		if len(pipet.BlockErrors()) > 0 {
+			return errPartialFailure
+		}
 
 		if interval > 0 {
 			if onChange != "" && previousValue != newValue {
@@ -151,10 +187,12 @@ func runPipet(c *cli.Context, specFile string) error {
 				previousValue = newValue
 			}
 			pipet.Data = []interface{}{}
+			pipet.Results = []common.BlockResult{}
 			time.Sleep(time.Duration(interval) * time.Second)
 		} else {
 			iterate = false
 		}
 	}
+
 	return nil
 }

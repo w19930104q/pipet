@@ -2,14 +2,24 @@ package parsers
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
+	"github.com/bjesus/pipet/common"
 	"github.com/tidwall/gjson"
 )
 
-func ParseJSONQueries(jsonData []byte, queries []string) (interface{}, string, error) {
+func ParseJSONQueries(jsonData []byte, queries []string) (result []interface{}, nextPage string, err error) {
+	// GJSON normally tolerates malformed paths, but keep a safety net so any
+	// unexpected failure is reported rather than crashing the run.
+	defer func() {
+		if r := recover(); r != nil {
+			err = common.NewStageError("parse", fmt.Errorf("JSON query failed: %v", r))
+			result = nil
+		}
+	}()
 
-	result := []interface{}{}
+	result = []interface{}{}
 
 	for i, line := range queries {
 
@@ -30,13 +40,21 @@ func ParseJSONQueries(jsonData []byte, queries []string) (interface{}, string, e
 			}
 
 			subresult := []interface{}{}
+			var subErr error
 			elements.ForEach(func(subi gjson.Result, subdoc gjson.Result) bool {
 				html := subdoc.String()
 
-				value2, _, _ := ParseJSONQueries([]byte(html), lines)
+				value2, _, e := ParseJSONQueries([]byte(html), lines)
+				if e != nil {
+					subErr = e
+					return false
+				}
 				subresult = append(subresult, value2)
 				return true
 			})
+			if subErr != nil {
+				return nil, "", subErr
+			}
 
 			result = append(result, subresult)
 		} else if indentation == 0 {
@@ -49,10 +67,9 @@ func ParseJSONQueries(jsonData []byte, queries []string) (interface{}, string, e
 			if len(parts) > 1 {
 				html = value.String()
 				for _, pipe := range parts[1:] {
-					pipedValue, err := ExecutePipe(html, strings.TrimSpace(pipe))
-					if err != nil {
-						// Handle error if needed
-						break
+					pipedValue, e := ExecutePipe(html, strings.TrimSpace(pipe))
+					if e != nil {
+						return nil, "", e
 					}
 					html = strings.TrimRight(pipedValue, "\n")
 				}
@@ -62,11 +79,13 @@ func ParseJSONQueries(jsonData []byte, queries []string) (interface{}, string, e
 
 			if json.Valid([]byte(html)) {
 				var parsedJSON interface{}
-				json.Unmarshal([]byte(html), &parsedJSON)
+				if e := json.Unmarshal([]byte(html), &parsedJSON); e != nil {
+					return nil, "", common.NewStageError("parse",
+						fmt.Errorf("failed to parse pipe output as JSON: %w", e))
+				}
 				result = append(result, parsedJSON)
 			} else {
 				result = append(result, html)
-
 			}
 
 		}

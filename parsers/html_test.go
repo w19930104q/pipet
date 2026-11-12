@@ -3,6 +3,7 @@ package parsers
 import (
 	"testing"
 
+	"github.com/bjesus/pipet/common"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -39,4 +40,72 @@ func TestParseHTMLQueries(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, expectedResult, result)
 	assert.Equal(t, "/more", nextPage)
+}
+
+// TestParseHTMLQueriesBadSelector turns an invalid CSS selector into a parse
+// error instead of panicking the whole process.
+func TestParseHTMLQueriesBadSelector(t *testing.T) {
+	htmlData := []byte(`<html><body><h1>title</h1></body></html>`)
+
+	result, nextPage, err := ParseHTMLQueries(htmlData, []string{"h1 >>> ["}, "")
+
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Equal(t, "", nextPage)
+	var stageErr *common.StageError
+	assert.ErrorAs(t, err, &stageErr)
+	assert.Equal(t, "parse", stageErr.Stage)
+}
+
+// TestParseHTMLQueriesFailingPipe propagates a non-zero pipe exit instead of
+// silently emitting an empty value.
+func TestParseHTMLQueriesFailingPipe(t *testing.T) {
+	htmlData := []byte(`<html><body><h1>title</h1></body></html>`)
+
+	result, _, err := ParseHTMLQueries(htmlData,
+		[]string{"h1 | command-that-does-not-exist-12345"}, "")
+
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	var stageErr *common.StageError
+	assert.ErrorAs(t, err, &stageErr)
+	assert.Equal(t, "pipe", stageErr.Stage)
+}
+
+// TestParseHTMLQueriesEmptyMatchPage verifies that a page with no matching
+// elements is still a completed page: it returns the empty string for the
+// unmatched query and no error, so pagination bookkeeping counts it.
+func TestParseHTMLQueriesEmptyMatchPage(t *testing.T) {
+	htmlData := []byte(`<html><body><a href="/p2">next</a></body></html>`)
+
+	result, nextPage, err := ParseHTMLQueries(htmlData, []string{"h1"}, "a")
+
+	assert.NoError(t, err)
+	assert.Equal(t, []interface{}{""}, result)
+	assert.Equal(t, "/p2", nextPage)
+}
+
+// TestParseHTMLQueriesWhitespaceAroundPipe keeps the historical tolerance of
+// whitespace around a query and its pipe.
+func TestParseHTMLQueriesWhitespaceAroundPipe(t *testing.T) {
+	htmlData := []byte(`<html><body><h1>title</h1></body></html>`)
+
+	result, _, err := ParseHTMLQueries(htmlData,
+		[]string{"h1 | wc -c"}, "")
+
+	assert.NoError(t, err)
+	// The pipe receives the element's outer HTML: <h1>title</h1>.
+	assert.Equal(t, []interface{}{"14"}, result)
+}
+
+// TestParseHTMLQueriesMissingNextLink returns an empty next page URL when
+// the selector does not match, which ends pagination normally.
+func TestParseHTMLQueriesMissingNextLink(t *testing.T) {
+	htmlData := []byte(`<html><body><h1>title</h1></body></html>`)
+
+	result, nextPage, err := ParseHTMLQueries(htmlData, []string{"h1"}, "a.next")
+
+	assert.NoError(t, err)
+	assert.Equal(t, []interface{}{"title"}, result)
+	assert.Equal(t, "", nextPage)
 }

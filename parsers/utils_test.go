@@ -1,7 +1,6 @@
 package parsers
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"testing"
@@ -10,36 +9,60 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// Mock exec.Command for testing ExecuteCurlBlock and ExecutePipe
-var execCommand = exec.Command
-
+// mockExecCommand replaces exec.Command in tests. The behavior is selected
+// through environment variables consumed by the re-executed test binary.
 func mockExecCommand(command string, args ...string) *exec.Cmd {
 	cs := []string{"-test.run=TestHelperProcess", "--", command}
 	cs = append(cs, args...)
 	cmd := exec.Command(os.Args[0], cs...)
-	cmd.Env = []string{"GO_WANT_HELPER_PROCESS=1"}
+	cmd.Env = []string{"GO_WANT_HELPER_PROCESS=1", "PIPET_MOCK=" + os.Getenv("PIPET_MOCK")}
 	return cmd
 }
 
-// Test helper for mock exec
+// TestHelperProcess is the re-executed mock command. It is not a real test.
 func TestHelperProcess(*testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		return
 	}
-	cmd := os.Args[3]
-	switch cmd {
-	case "curl":
-		os.Stdout.Write([]byte(`{"success":true}`)) // Mock JSON response
+	switch os.Getenv("PIPET_MOCK") {
+	case "curl-fail":
+		os.Stderr.WriteString("curl: (7) failed to connect")
+		os.Exit(7)
+	case "curl-empty":
+		os.Exit(0)
 	default:
-		os.Stdout.Write([]byte("bash output"))
+		os.Stdout.Write([]byte(`{"success":true}`))
+		os.Exit(0)
 	}
-	os.Exit(0)
 }
 
-// Test ExecuteCurlBlock
-func TestExecuteCurlBlock(t *testing.T) {
+func withMockedExec(t *testing.T) {
+	t.Helper()
 	execCommand = mockExecCommand
-	defer func() { execCommand = exec.Command }() // Restore exec.Command after test
+	t.Cleanup(func() { execCommand = exec.Command })
+}
+
+// TestExecuteCurlBlock verifies the happy path now that the mock is actually
+// wired into the command execution.
+func TestExecuteCurlBlock(t *testing.T) {
+	withMockedExec(t)
+	t.Setenv("PIPET_MOCK", "curl-ok")
+
+	block := common.Block{
+		Type:    "curl",
+		Command: "curl http://example.com",
+		Queries: []string{"success"},
+	}
+	result, _, err := ExecuteCurlBlock(block)
+	assert.NoError(t, err)
+	assert.Equal(t, []interface{}{true}, result)
+}
+
+// TestExecuteCurlBlockCommandFailure makes sure a non-zero curl exit stops
+// the block with a "command" stage error instead of being parsed as data.
+func TestExecuteCurlBlockCommandFailure(t *testing.T) {
+	withMockedExec(t)
+	t.Setenv("PIPET_MOCK", "curl-fail")
 
 	block := common.Block{
 		Type:    "curl",
@@ -47,32 +70,63 @@ func TestExecuteCurlBlock(t *testing.T) {
 		Queries: []string{"h1"},
 	}
 	result, _, err := ExecuteCurlBlock(block)
-	fmt.Printf("%v", result)
-	assert.NoError(t, err)
-	assert.NotNil(t, result)
-	assert.Equal(t, []interface{}{"Example Domain"}, result) // Mocked JSON output
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	var stageErr *common.StageError
+	assert.ErrorAs(t, err, &stageErr)
+	assert.Equal(t, "command", stageErr.Stage)
+	assert.Contains(t, err.Error(), "curl command failed")
 }
 
-// Test ExecutePipe
+// TestExecuteCurlBlockEmptyBody treats an empty response body as a command
+// failure so it can never produce a page of empty values.
+func TestExecuteCurlBlockEmptyBody(t *testing.T) {
+	withMockedExec(t)
+	t.Setenv("PIPET_MOCK", "curl-empty")
+
+	block := common.Block{
+		Type:    "curl",
+		Command: "curl http://example.com",
+		Queries: []string{"h1"},
+	}
+	result, _, err := ExecuteCurlBlock(block)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	var stageErr *common.StageError
+	assert.ErrorAs(t, err, &stageErr)
+	assert.Equal(t, "command", stageErr.Stage)
+	assert.Contains(t, err.Error(), "empty response body")
+}
+
+// TestExecutePipe uses the real bash to verify the success path.
 func TestExecutePipe(t *testing.T) {
-	execCommand = mockExecCommand
-	defer func() { execCommand = exec.Command }() // Restore exec.Command after test
-
-	input := "pipet"
-	command := "wc -c"
-	output, err := ExecutePipe(input, command)
+	output, err := ExecutePipe("pipet", "wc -c")
 	assert.NoError(t, err)
-	assert.Equal(t, "5\n", output) // Mocked output
+	assert.Equal(t, "5\n", output)
 }
 
-// Test CalculateIndentation
+// TestExecutePipeNonZero ensures non-zero pipe exits are reported with the
+// "pipe" stage and stderr, not swallowed.
+func TestExecutePipeNonZero(t *testing.T) {
+	output, err := ExecutePipe("input", "grep nomatch-please")
+	assert.Error(t, err)
+	assert.Equal(t, "", output)
+	var stageErr *common.StageError
+	assert.ErrorAs(t, err, &stageErr)
+	assert.Equal(t, "pipe", stageErr.Stage)
+	assert.Contains(t, err.Error(), "failed")
+
+	// A missing command must surface as an error too.
+	_, err = ExecutePipe("input", "command-that-does-not-exist-12345")
+	assert.Error(t, err)
+}
+
 func TestCalculateIndentation(t *testing.T) {
 	assert.Equal(t, 4, CalculateIndentation("    indented"))
 	assert.Equal(t, 0, CalculateIndentation("not indented"))
 }
 
-// Test commandExists
 func TestCommandExists(t *testing.T) {
-	assert.True(t, commandExists("bash"))  // Assuming bash exists on your system
-	assert.False(t, commandExists("fake")) // Fake command
+	assert.True(t, commandExists("bash"))
+	assert.False(t, commandExists("fake"))
 }

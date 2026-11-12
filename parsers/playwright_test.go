@@ -1,6 +1,7 @@
 package parsers
 
 import (
+	"os/exec"
 	"testing"
 
 	"github.com/bjesus/pipet/common"
@@ -8,6 +9,16 @@ import (
 )
 
 func TestExecutePlaywrightBlock(t *testing.T) {
+	// This test drives a real headless browser and downloads Chromium on
+	// first use, so it is skipped when the browser toolchain is unavailable
+	// (e.g. offline CI). The curl/HTML/JSON paths cover core behavior.
+	if _, err := exec.LookPath("chromium"); err != nil {
+		if _, err := exec.LookPath("chromium-browser"); err != nil {
+			if _, err := exec.LookPath("google-chrome"); err != nil {
+				t.Skip("no headless browser found; skipping Playwright end-to-end test")
+			}
+		}
+	}
 
 	block := common.Block{
 		Type:    "playwright",

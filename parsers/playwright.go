@@ -54,7 +54,7 @@ func ExecutePlaywrightBlock(block common.Block) (interface{}, error) {
 
 		value, err := page.Evaluate(jsQuery)
 		if err != nil {
-			return nil, fmt.Errorf("failed to evaluate JavaScript: %w", err)
+			return nil, common.NewStageError("parse", fmt.Errorf("failed to evaluate JavaScript: %w", err))
 		}
 
 		if len(parts) > 1 {

@@ -32,8 +32,24 @@ curl https://news.ycombinator.com/
   
 Use the `--separator` (or `-s`) flag to specify custom separators for text output.  For example, run `pipet -s "\n" -s "->" hackernews.pipet` to see each item in a new line, with `->` between the title and the domain.</details>
 <details><summary>Get as JSON</summary>
-  
-Use the `--json` flag to make Pipet collect the results into a nice JSON.  For example, run `pipet --json hackernews.pipet` to get a JSON representation of the above results.</details>
+
+Use the `--json` flag to make Pipet collect the results into a structured report. For example, run `pipet --json hackernews.pipet` to get a JSON document with a stable `results` array (one entry per block, each holding its successfully completed `pages` and a `stop_reason`) and an `errors` array. Blocks or pages that failed are never mixed into `results` - they are reported separately in `errors` with the block index, page number, failing stage and message.
+
+```json
+{
+  "results": [
+    {
+      "index": 0,
+      "type": "curl",
+      "pages": [ ["title one", "example.com"] ],
+      "stop_reason": "completed"
+    }
+  ],
+  "errors": []
+}
+```
+
+`stop_reason` is one of `completed` (no next page), `max-pages` (the `--max-pages` limit was reached), `loop` (a next page pointed back at an already visited URL) or `error` (a command, pipe or query failed). Both `results` and `errors` are always arrays.</details>
 <details><summary>Render to a template</summary>
 
 Add a template file called `hackernews.tpl` next to your `hackernews.pipet` file with this content:
@@ -98,6 +114,21 @@ The only required argument for Pipet is the path to your `.pipet` file. Other th
 - `--verbose`, `-v` - Enable verbose logging (default: false)
 - `--version` - Print the Pipet version
 - `--help`, `-h` - Show help
+
+# Error handling and exit codes
+
+Pipet treats each block as an independent job. When a command (e.g. `curl`) returns a non-zero exit, a pipe command fails, or a query cannot be parsed, Pipet **stops that block immediately** instead of silently emitting empty values. The pages the block already completed are kept, no partial record for the failing page is ever produced, and every other block still runs.
+
+Failures are reported on `stderr` in the form `pipet: block <n> stopped at page <p> (<stage>): <message>`, where `<stage>` is one of:
+
+- `command` - the resource command (curl/playwright) failed or returned an empty body
+- `parse` - a CSS/GJSON selector or query was invalid
+- `pipe` - a Unix pipe after a query exited non-zero
+- `next-page` - the next-page URL could not be resolved
+
+The process exits with status `1` if at least one block failed (partial results are still printed), and `0` when every block completed. This makes Pipet safe to use in scripts and pipelines: a swallowed error can no longer look like a successful run. When Pipet's own output is piped to a command that exits early (for example `pipet feed.pipet | head`), the resulting broken pipe ends Pipet quietly with status `0`.
+
+Text and template output keep their historical format and render only the successfully completed data. The `--json` report additionally carries the full per-block outcome described above.
 
 # Pipet files
 Pipet files describe where and how to get the data you are interested in. They are normal text files containing one or more blocks separated by an empty line. Lines beginning with `//` are ignored and can be used for comments. Every block can have 3 sections:
@@ -251,5 +282,12 @@ curl https://news.ycombinator.com/
   .sitebit a
 > a.morelink
 ```
+
+Both absolute and relative next-page links are supported. Pagination stops when:
+
+- there is no next-page link (`stop_reason: completed`),
+- the `--max-pages` limit is reached. The limit counts **actually completed pages**, so a block that ends early never wastes requests (`stop_reason: max-pages`),
+- a next-page link resolves to a URL already visited by this block. Pipet detects the loop, fetches the repeated URL at most once and keeps the pages already collected (`stop_reason: loop`),
+- a command, pipe or query fails. The block stops on that page and keeps every page completed before it (`stop_reason: error`).
 
 The Next Page line is currently only available when working with `curl` and HTML files.
